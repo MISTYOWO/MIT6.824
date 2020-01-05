@@ -122,6 +122,7 @@ type logEntry struct {
 type RequestVoteReply struct {
 	// Your data here (2A).
 	//current term
+	Rpcok  bool
 	Server int
 	Term   int
 	//true or false
@@ -154,8 +155,8 @@ type RequestVoteArgs struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	// rf.mu.Lock()
-	// defer rf.mu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	return rf.currentTerm, rf.status == "leader"
 }
@@ -209,13 +210,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if rf.currentTerm > args.Term ||
-		(rf.currentTerm == args.Term && rf.votedFor != -1) { // the server has voted in this term
+		(rf.currentTerm == args.Term && rf.votedFor != -1) {
 		reply.Term, reply.VoteGranted = rf.currentTerm, false
 		return
 	}
 	if args.Term > rf.currentTerm {
 		rf.currentTerm, rf.votedFor = args.Term, -1
-		if rf.status != "Follower" { // once server becomes follower, it has to reset electionTimer
+		if rf.status != "Follower" {
 			rf.resetTimeclock(randTime(ElectionTime))
 			rf.status = "Follower"
 		}
@@ -296,7 +297,7 @@ func randTime(duration time.Duration) time.Duration {
 	return timeLimit
 }
 
-//leader status
+//leader and follower contacts every one interval
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -307,6 +308,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = args.Term
 	rf.leaderId = args.LeaderId
 	rf.resetTimeclock(randTime(ElectionTime))
+	//fmt.Printf("%d as leader and %d as %s contact at term %d \n", args.LeaderId, rf.me, rf.status, args.Term)
 	return
 }
 
@@ -326,6 +328,7 @@ func (rf *Raft) resetTimeclock(timeLimit time.Duration) {
 }
 func (rf *Raft) newelection() {
 	rf.mu.Lock()
+	fmt.Printf("%d at %d term start election \n", rf.me, rf.currentTerm)
 	if rf.status == "leader" {
 		rf.mu.Unlock()
 		return
@@ -352,17 +355,22 @@ func (rf *Raft) newelection() {
 		case <-timer:
 			return
 		case reply := <-replyCh:
-			if reply.VoteGranted {
-				voteCount++
+			if !reply.Rpcok {
+				rf.requestforVote(reply.Server, args, replyCh)
 			} else {
-				rf.mu.Lock()
-				if rf.currentTerm < reply.Term {
-					rf.old(reply.Term)
-
+				if reply.VoteGranted {
+					voteCount++
+					fmt.Printf("%d term %d vote for %d \n", rf.currentTerm, rf.me, args.CandidateId)
 				} else {
-					rf.requestforVote(reply.Server, args, replyCh)
+					rf.mu.Lock()
+					if rf.currentTerm < reply.Term {
+						fmt.Printf("before old(),%d at %d term as %s", reply.Term, rf.currentTerm, rf.status)
+						rf.old(reply.Term)
+						fmt.Printf("after old(),%d at %d term as %s", reply.Term, rf.currentTerm, rf.status)
+					}
+					rf.mu.Unlock()
+					return
 				}
-				rf.mu.Unlock()
 			}
 		}
 	}
@@ -370,11 +378,15 @@ func (rf *Raft) newelection() {
 	if rf.status == "candidate" {
 		rf.status = "leader"
 		go rf.tick()
-		go rf.notifyNewLeader()
+		//go rf.notifyNewLeader()
 	}
 	rf.mu.Unlock()
 }
+
+// when rf find a newer server ,it should be a follower
 func (rf *Raft) old(term int) {
+
+	fmt.Printf("%d from %d to %d \n", rf.me, rf.currentTerm, term)
 	rf.currentTerm = term
 	rf.status = "follower"
 	rf.votedFor, rf.voteNum = -1, -1
@@ -391,6 +403,7 @@ func (rf *Raft) tick() {
 			}
 			go rf.replicate()
 			timer.Reset(ApplyMsgInterval)
+			rf.resetTimeclock(randTime(ElectionTime))
 		}
 	}
 }
@@ -418,7 +431,7 @@ func (rf *Raft) sendLogEntry(follower int) {
 		Term: -1,
 	}
 	rf.mu.Unlock()
-	if rf.peers[follower].Call("Raft.AppendEntries", &args, &reply) {
+	if rf.peers[follower].Call("Raft.AppendEntries", args, reply) {
 		rf.mu.Lock()
 		if !reply.Ans {
 			if reply.Term > rf.currentTerm {
@@ -433,7 +446,8 @@ func (rf *Raft) notifyNewLeader() {
 }
 func (rf *Raft) requestforVote(server int, args RequestVoteArgs, replyCh chan RequestVoteReply) {
 	var reply RequestVoteReply
-	rf.peers[server].Call("Raft.RequestVote", &args, &reply)
+	ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
+	reply.Rpcok = ok
 	replyCh <- reply
 }
 
@@ -448,13 +462,15 @@ func (rf *Raft) requestforVote(server int, args RequestVoteArgs, replyCh chan Re
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func (rf *Raft) send() {
+//this is for follower and checking what happens in applych
+func (rf *Raft) checkSend() {
 	for {
 		select {
-		case <-rf.notifyapplyCh:
-			rf.mu.Lock()
-
-			rf.mu.Unlock()
+		case <-rf.applyCh:
+			{
+				//if rf.applyCh has some message what should do
+				continue
+			}
 		}
 	}
 }
@@ -475,14 +491,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.notifyapplyCh = make(chan struct{}, 100)
 	rf.Timeout = time.NewTimer(randTime(ElectionTime))
 	fmt.Printf("%d term %d start up\n", rf.currentTerm, rf.me)
-	go rf.send()
+	go rf.checkSend()
 	go func() {
 		for {
 			select {
 			case <-rf.Timeout.C:
-				fmt.Printf("%d timeout start election at term %d\n", rf.me, rf.currentTerm)
 				rf.newelection()
-				fmt.Printf("%d timeout end election at term %d as %s\n", rf.me, rf.currentTerm, rf.status)
 			}
 		}
 	}()
