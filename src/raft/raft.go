@@ -18,14 +18,13 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 	"time"
 )
 import "labrpc"
 
-//import "fmt"
+// import "fmt"
 
 // import "bytes"
 // import "labgob"
@@ -156,9 +155,11 @@ type RequestVoteArgs struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	term := rf.currentTerm
+	isLeader := rf.status == "leader"
+	rf.mu.Unlock()
 
-	return rf.currentTerm, rf.status == "leader"
+	return term, isLeader
 }
 
 //
@@ -215,11 +216,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if args.Term > rf.currentTerm {
-		rf.currentTerm, rf.votedFor = args.Term, -1
-		if rf.status != "Follower" {
-			rf.resetTimeclock(randTime(ElectionTime))
-			rf.status = "Follower"
-		}
+		// fmt.Printf("voter find a new term from RequestVote\n")
+		rf.old(args.Term)
 	}
 	rf.leaderId = -1
 	reply.Term = args.Term
@@ -308,7 +306,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = args.Term
 	rf.leaderId = args.LeaderId
 	rf.resetTimeclock(randTime(ElectionTime))
-	//fmt.Printf("%d as leader and %d as %s contact at term %d \n", args.LeaderId, rf.me, rf.status, args.Term)
 	return
 }
 
@@ -328,7 +325,7 @@ func (rf *Raft) resetTimeclock(timeLimit time.Duration) {
 }
 func (rf *Raft) newelection() {
 	rf.mu.Lock()
-	fmt.Printf("%d at %d term start election \n", rf.me, rf.currentTerm)
+	// fmt.Printf("%d at %d term start election \n", rf.me, rf.currentTerm)
 	if rf.status == "leader" {
 		rf.mu.Unlock()
 		return
@@ -360,13 +357,12 @@ func (rf *Raft) newelection() {
 			} else {
 				if reply.VoteGranted {
 					voteCount++
-					fmt.Printf("%d term %d vote for %d \n", rf.currentTerm, rf.me, args.CandidateId)
+					// fmt.Printf("%d term %d vote for %d \n", rf.currentTerm, rf.me, args.CandidateId)
 				} else {
 					rf.mu.Lock()
 					if rf.currentTerm < reply.Term {
-						fmt.Printf("before old(),%d at %d term as %s", reply.Term, rf.currentTerm, rf.status)
+						// fmt.Printf("during election the candidate become older \n")
 						rf.old(reply.Term)
-						fmt.Printf("after old(),%d at %d term as %s", reply.Term, rf.currentTerm, rf.status)
 					}
 					rf.mu.Unlock()
 					return
@@ -386,7 +382,7 @@ func (rf *Raft) newelection() {
 // when rf find a newer server ,it should be a follower
 func (rf *Raft) old(term int) {
 
-	fmt.Printf("%d from %d to %d \n", rf.me, rf.currentTerm, term)
+	// fmt.Printf("%d from %d to %d \n", rf.me, rf.currentTerm, term)
 	rf.currentTerm = term
 	rf.status = "follower"
 	rf.votedFor, rf.voteNum = -1, -1
@@ -394,7 +390,7 @@ func (rf *Raft) old(term int) {
 	rf.resetTimeclock(randTime(ElectionTime))
 }
 func (rf *Raft) tick() {
-	timer := time.NewTimer((ApplyMsgInterval))
+	timer := time.NewTimer((time.Duration(0 * time.Millisecond)))
 	for {
 		select {
 		case <-timer.C:
@@ -403,20 +399,33 @@ func (rf *Raft) tick() {
 			}
 			go rf.replicate()
 			timer.Reset(ApplyMsgInterval)
-			rf.resetTimeclock(randTime(ElectionTime))
 		}
 	}
 }
 func (rf *Raft) replicate() {
-	rf.mu.Lock()
-	rf.mu.Unlock()
-	for follower := range rf.peers {
-		if follower != rf.me {
-			go rf.sendLogEntry(follower)
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	sendList := make(chan int, len(rf.peers))
+	okList := make(chan int, len(rf.peers))
+	go func() {
+		for follower := range rf.peers {
+			if follower != rf.me {
+				rf.sendLogEntry(follower, sendList, okList)
+			}
+		}
+	}()
+	sendNum := 0
+	for sendNum < len(rf.peers)/2+1 {
+		select {
+		case retryFollower := <-sendList:
+			rf.sendLogEntry(retryFollower, sendList, okList)
+		case <-okList:
+			sendNum++
 		}
 	}
+	rf.resetTimeclock(randTime(ElectionTime))
 }
-func (rf *Raft) sendLogEntry(follower int) {
+func (rf *Raft) sendLogEntry(follower int, sendList chan int, ok chan int) {
 	rf.mu.Lock()
 	if rf.status != "leader" {
 		rf.mu.Unlock()
@@ -435,15 +444,17 @@ func (rf *Raft) sendLogEntry(follower int) {
 		rf.mu.Lock()
 		if !reply.Ans {
 			if reply.Term > rf.currentTerm {
+				// fmt.Printf("find a new term from heartebeats \n")
 				rf.old(reply.Term)
 			}
 		}
 		rf.mu.Unlock()
+	} else {
+		sendList <- follower
 	}
+	return
 }
-func (rf *Raft) notifyNewLeader() {
-	rf.applyCh <- ApplyMsg{CommandValid: false, CommandIndex: -1, CommandTerm: -1, Command: "NewLeader"}
-}
+
 func (rf *Raft) requestforVote(server int, args RequestVoteArgs, replyCh chan RequestVoteReply) {
 	var reply RequestVoteReply
 	ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
@@ -465,13 +476,8 @@ func (rf *Raft) requestforVote(server int, args RequestVoteArgs, replyCh chan Re
 //this is for follower and checking what happens in applych
 func (rf *Raft) checkSend() {
 	for {
-		select {
-		case <-rf.applyCh:
-			{
-				//if rf.applyCh has some message what should do
-				continue
-			}
-		}
+		time.Sleep(time.Duration(500 * time.Millisecond))
+		// fmt.Printf("%d at %d term as %s \n", rf.me, rf.currentTerm, rf.status)
 	}
 }
 func Make(peers []*labrpc.ClientEnd, me int,
@@ -490,7 +496,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.notifyapplyCh = make(chan struct{}, 100)
 	rf.Timeout = time.NewTimer(randTime(ElectionTime))
-	fmt.Printf("%d term %d start up\n", rf.currentTerm, rf.me)
+	// fmt.Printf("%d term %d start up\n", rf.currentTerm, rf.me)
 	go rf.checkSend()
 	go func() {
 		for {

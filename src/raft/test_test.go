@@ -95,6 +95,7 @@ func TestReElection2A(t *testing.T) {
 }
 
 func TestBasicAgree2B(t *testing.T) {
+	time.Sleep(time.Duration(100000 * time.Millisecond))
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -149,6 +150,7 @@ func TestFailAgree2B(t *testing.T) {
 }
 
 func TestFailNoAgree2B(t *testing.T) {
+
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
