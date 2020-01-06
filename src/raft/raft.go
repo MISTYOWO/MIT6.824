@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -54,25 +55,31 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu            sync.Mutex          // Lock to protect shared access to this peer's state
-	peers         []*labrpc.ClientEnd // RPC end points of all peers
-	persister     *Persister          // Object to hold this peer's persisted state
-	me            int                 // this peer's index into peers[]
-	leaderId      int
-	currentTerm   int
-	votedFor      int
-	logs          []logEntry
-	commitIndex   int
-	lastApplied   int
-	nextIndex     []int
-	matchIndex    []int
-	voteNum       int
-	status        string
-	lastLogIndex  int
-	lastLogTerm   int
+	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     []*labrpc.ClientEnd // RPC end points of all peers
+	persister *Persister          // Object to hold this peer's persisted state
+	me        int                 // this peer's index into peers[]
+	leaderId  int
+
+	currentTerm int
+	votedFor    int
+	logs        []logEntry
+
+	commitIndex int
+	lastApplied int
+
+	nextIndex  []int
+	matchIndex []int
+
+	voteNum      int
+	status       string
+	lastLogIndex int
+	lastLogTerm  int
+
 	applyCh       chan ApplyMsg
 	notifyapplyCh chan struct{}
-	Timeout       *time.Timer
+
+	Timeout *time.Timer
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.\
@@ -101,16 +108,20 @@ type Raft struct {
 
 }
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []logEntry
+	LeaderCommit int
 }
 type AppendEntriesReply struct {
-	Ans  bool
-	Term int
+	Success bool
+	Term    int
 }
 type logEntry struct {
-	index   int
-	term    int
+	Index   int
+	Term    int
 	Command interface{}
 }
 
@@ -286,6 +297,23 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	term, isLeader = rf.GetState()
+	// if isLeader {
+	// 	log := &logEntry{
+	// 		Term:    rf.currentTerm,
+	// 		index:   rf.lastLogIndex,
+	// 		Command: command,
+	// 	}
+	// 	args := &AppendEntriesArgs{
+	// 		Term:         rf.currentTerm,
+	// 		LeaderId:     rf.me,
+	// 		PrevLogIndex: rf.lastLogIndex,
+	// 		PrevLogTerm:  rf.lastLogTerm,
+	// 		Entries:      log,
+	// 		LeaderCommit: rf.commitIndex,
+	// 	}
+
+	// }
 
 	return index, term, isLeader
 }
@@ -300,10 +328,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.currentTerm > args.Term {
-		reply.Term, reply.Ans = rf.currentTerm, false
+		reply.Term, reply.Success = rf.currentTerm, false
 		return
 	}
 	reply.Term = args.Term
+	reply.Success = true
 	rf.leaderId = args.LeaderId
 	rf.resetTimeclock(randTime(ElectionTime))
 	return
@@ -406,26 +435,32 @@ func (rf *Raft) replicate() {
 	//rf.mu.Lock()
 	//defer rf.mu.Unlock()
 	sendList := make(chan int, len(rf.peers))
-	okList := make(chan int, len(rf.peers))
 	go func() {
 		for follower := range rf.peers {
 			if follower != rf.me {
-				rf.sendLogEntry(follower, sendList, okList)
+				rf.sendLogEntry(follower, sendList)
 			}
 		}
 	}()
 	sendNum := 0
 	for sendNum < len(rf.peers)/2+1 {
 		select {
-		case retryFollower := <-sendList:
-			rf.sendLogEntry(retryFollower, sendList, okList)
-		case <-okList:
-			sendNum++
+		case Follower := <-sendList:
+			{
+				if Follower < 0 {
+					sendNum++
+					//fmt.Printf("%d and %d has contact \n", rf.me, -Follower+1)
+				} else {
+					rf.sendLogEntry(Follower-1, sendList)
+					//fmt.Printf("%d and %d has not contact \n", rf.me, Follower-1)
+				}
+			}
 		}
 	}
+	//fmt.Printf("replicate ok \n")
 	rf.resetTimeclock(randTime(ElectionTime))
 }
-func (rf *Raft) sendLogEntry(follower int, sendList chan int, ok chan int) {
+func (rf *Raft) sendLogEntry(follower int, sendList chan int) {
 	rf.mu.Lock()
 	if rf.status != "leader" {
 		rf.mu.Unlock()
@@ -436,21 +471,26 @@ func (rf *Raft) sendLogEntry(follower int, sendList chan int, ok chan int) {
 		LeaderId: rf.me,
 	}
 	reply := &AppendEntriesReply{
-		Ans:  false,
-		Term: -1,
+		Success: false,
+		Term:    -1,
 	}
 	rf.mu.Unlock()
 	if rf.peers[follower].Call("Raft.AppendEntries", args, reply) {
 		rf.mu.Lock()
-		if !reply.Ans {
+		if !reply.Success {
 			if reply.Term > rf.currentTerm {
-				// fmt.Printf("find a new term from heartebeats \n")
+				fmt.Printf("find a new term from heartebeats \n")
 				rf.old(reply.Term)
 			}
 		}
 		rf.mu.Unlock()
+		if reply.Success {
+			//fmt.Printf("sendList <- -1 * (follower + 1)")
+			sendList <- -1 * (follower + 1)
+		}
+
 	} else {
-		sendList <- follower
+		sendList <- (follower + 1)
 	}
 	return
 }
@@ -474,12 +514,12 @@ func (rf *Raft) requestforVote(server int, args RequestVoteArgs, replyCh chan Re
 // for any long-running work.
 //
 //this is for follower and checking what happens in applych
-func (rf *Raft) checkSend() {
-	for {
-		time.Sleep(time.Duration(500 * time.Millisecond))
-		// fmt.Printf("%d at %d term as %s \n", rf.me, rf.currentTerm, rf.status)
-	}
-}
+// func (rf *Raft) checkSend() {
+// 	for {
+// 		time.Sleep(time.Duration(500 * time.Millisecond))
+// 		// fmt.Printf("%d at %d term as %s \n", rf.me, rf.currentTerm, rf.status)
+// 	}
+// }
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
@@ -487,6 +527,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.logs = make([]logEntry, 0) //
+
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.currentTerm = 0
@@ -497,7 +538,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.notifyapplyCh = make(chan struct{}, 100)
 	rf.Timeout = time.NewTimer(randTime(ElectionTime))
 	// fmt.Printf("%d term %d start up\n", rf.currentTerm, rf.me)
-	go rf.checkSend()
+	// go rf.checkSend()
 	go func() {
 		for {
 			select {
