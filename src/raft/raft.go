@@ -68,8 +68,8 @@ type Raft struct {
 	commitIndex int
 	lastApplied int
 
-	nextIndex  []int
-	matchIndex []int
+	nextIndex  []int // the index of next log should send to server
+	matchIndex []int // the index of commited log of each server
 
 	voteNum      int
 	status       string
@@ -77,9 +77,9 @@ type Raft struct {
 	lastLogTerm  int
 
 	applyCh       chan ApplyMsg
-	notifyapplyCh chan struct{}
-
-	Timeout *time.Timer
+	//notifyapplyCh chan struct{}
+	kill          chan int
+	Timeout       *time.Timer
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.\
@@ -295,26 +295,29 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-
 	// Your code here (2B).
 	term, isLeader = rf.GetState()
-	// if isLeader {
-	// 	log := &logEntry{
-	// 		Term:    rf.currentTerm,
-	// 		index:   rf.lastLogIndex,
-	// 		Command: command,
-	// 	}
-	// 	args := &AppendEntriesArgs{
-	// 		Term:         rf.currentTerm,
-	// 		LeaderId:     rf.me,
-	// 		PrevLogIndex: rf.lastLogIndex,
-	// 		PrevLogTerm:  rf.lastLogTerm,
-	// 		Entries:      log,
-	// 		LeaderCommit: rf.commitIndex,
-	// 	}
-
-	// }
-
+	if isLeader {
+		rf.mu.Lock()
+		log := &logEntry{
+			Term:    rf.currentTerm,
+			Index:   rf.lastLogIndex+1,
+			Command: command,
+		}
+		// args := &AppendEntriesArgs{
+		// 	Term:         rf.currentTerm,
+		// 	LeaderId:     rf.me,
+		// 	PrevLogIndex: rf.lastLogIndex,
+		// 	PrevLogTerm:  rf.lastLogTerm,
+		// 	Entries:      log,
+		// 	LeaderCommit: rf.commitIndex,
+		// }
+		rf.logs = append(rf.logs, *log)
+		rf.lastLogIndex++
+		rf.lastLogTerm = rf.currentTerm
+		rf.mu.Unlock()
+		go rf.replicate()
+	}
 	return index, term, isLeader
 }
 
@@ -346,11 +349,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
+	rf.kill <- 1
 	// Your code here, if desired.
 }
 func (rf *Raft) resetTimeclock(timeLimit time.Duration) {
 	rf.Timeout.Stop()
 	rf.Timeout.Reset(timeLimit)
+}
+// leader init its nextIndex 
+func (rf *Raft) initIndex(){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	indexNum = len(rf.nextIndex)
+	for i = 0;i<index;i++{
+		rf.nextIndex[i] = rf.lastLogIndex + 1
+		rf.matchIndex[i] = 0
+	}
 }
 func (rf *Raft) newelection() {
 	rf.mu.Lock()
@@ -402,6 +416,7 @@ func (rf *Raft) newelection() {
 	rf.mu.Lock()
 	if rf.status == "candidate" {
 		rf.status = "leader"
+		rf.initIndex()
 		go rf.tick()
 		//go rf.notifyNewLeader()
 	}
@@ -432,8 +447,8 @@ func (rf *Raft) tick() {
 	}
 }
 func (rf *Raft) replicate() {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
 	sendList := make(chan int, len(rf.peers))
 	go func() {
 		for follower := range rf.peers {
@@ -447,6 +462,7 @@ func (rf *Raft) replicate() {
 		select {
 		case Follower := <-sendList:
 			{
+				//<0 means ok else it means has some net problem
 				if Follower < 0 {
 					sendNum++
 					//fmt.Printf("%d and %d has contact \n", rf.me, -Follower+1)
@@ -469,6 +485,9 @@ func (rf *Raft) sendLogEntry(follower int, sendList chan int) {
 	args := &AppendEntriesArgs{
 		Term:     rf.currentTerm,
 		LeaderId: rf.me,
+		PrevLogIndex : rf.lastLogIndex
+		PrevLogTerm : rf.lastLogTerm
+		
 	}
 	reply := &AppendEntriesReply{
 		Success: false,
@@ -523,20 +542,31 @@ func (rf *Raft) requestforVote(server int, args RequestVoteArgs, replyCh chan Re
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.leaderId = -1
+	
+	rf.currentTerm = 0
+	rf.votedFor = -1
 	rf.logs = make([]logEntry, 0) //
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.currentTerm = 0
-	rf.leaderId = -1
-	rf.votedFor = -1
+	
+	rf.nextIndex = make([]int,len(rf.peers))
+	rf.matchIndex = make([]int,len(rf.peers))
+
 	rf.voteNum = 0
+	rf.status = "follower"
+	rf.lastLogIndex = 0
+	rf.lastLogTerm = 0
+	
 	rf.applyCh = applyCh
-	rf.notifyapplyCh = make(chan struct{}, 100)
+	//rf.notifyapplyCh = make(chan struct{}, 100)
 	rf.Timeout = time.NewTimer(randTime(ElectionTime))
+	rf.kill = make(chan int)
 	// fmt.Printf("%d term %d start up\n", rf.currentTerm, rf.me)
 	// go rf.checkSend()
 	go func() {
@@ -544,6 +574,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			select {
 			case <-rf.Timeout.C:
 				rf.newelection()
+			case <-rf.kill:
+				return
 			}
 		}
 	}()
