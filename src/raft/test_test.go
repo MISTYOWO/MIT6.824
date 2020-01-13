@@ -19,7 +19,7 @@ import "sync"
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
-func InitialElection2A(t *testing.T) {
+func TestInitialElection2A(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -46,7 +46,7 @@ func InitialElection2A(t *testing.T) {
 	cfg.end()
 }
 
-func ReElection2A(t *testing.T) {
+func TestReElection2A(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -94,7 +94,7 @@ func ReElection2A(t *testing.T) {
 	cfg.end()
 }
 
-func BasicAgree2B(t *testing.T) {
+func TestBasicAgree2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -117,7 +117,7 @@ func BasicAgree2B(t *testing.T) {
 	cfg.end()
 }
 
-func FailAgree2B(t *testing.T) {
+func TestFailAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -148,7 +148,7 @@ func FailAgree2B(t *testing.T) {
 	cfg.end()
 }
 
-func FailNoAgree2B(t *testing.T) {
+func TestFailNoAgree2B(t *testing.T) {
 
 	servers := 5
 	cfg := make_config(t, servers, false)
@@ -200,7 +200,7 @@ func FailNoAgree2B(t *testing.T) {
 	cfg.end()
 }
 
-func ConcurrentStarts2B(t *testing.T) {
+func TestConcurrentStarts2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -301,7 +301,7 @@ loop:
 	cfg.end()
 }
 
-func Rejoin2B(t *testing.T) {
+func TestRejoin2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -339,7 +339,7 @@ func Rejoin2B(t *testing.T) {
 	cfg.end()
 }
 
-func Backup2B(t *testing.T) {
+func TestBackup2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -411,7 +411,7 @@ func Backup2B(t *testing.T) {
 	cfg.end()
 }
 
-func Count2B(t *testing.T) {
+func TestCount2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
